@@ -6,6 +6,11 @@ import com.diy.framework.beans.factory.BeanScanner;
 import com.diy.framework.beans.factory.ConfigurationClassBeanDefinition;
 import com.diy.framework.context.annotation.Bean;
 import com.diy.framework.context.annotation.Component;
+import com.diy.framework.context.annotation.Controller;
+import com.diy.framework.web.method.HandlerMethod;
+import com.diy.framework.web.method.RequestMappingInfo;
+import com.diy.framework.web.method.RequestMethodsRequestCondition;
+import com.diy.framework.web.mvc.anotation.RequestMapping;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Executable;
@@ -18,6 +23,8 @@ import java.util.List;
 import java.util.Map;
 
 public class ApplicationContext {
+
+    public static final Map<RequestMappingInfo, Object> handlerMapping = new HashMap<>();
 
     private final String basePackage;
     private final List<BeanDefinition> beanDefinitionRegistry = new ArrayList<>();
@@ -64,18 +71,44 @@ public class ApplicationContext {
                 final Object bean = autowireConstructor((Constructor<?>) factoryMethod, arguments);
                 saveBean(beanDefinition.getBeanName(), bean);
 
+                extractHandlerMethod(beanDefinition, bean);
+
                 return bean;
             }
 
             final Object bean = instantiateUsingFactoryMethod(beanDefinition, arguments);
             saveBean(beanDefinition.getBeanName(), bean);
 
-            return bean;
+            extractController(beanDefinition, bean);
 
+            return bean;
         } catch (Exception e) {
             throw new RuntimeException(e);
         } finally {
             factoryMethod.setAccessible(false);
+        }
+    }
+
+    private void extractHandlerMethod(final BeanDefinition beanDefinition, final Object bean) {
+        if (beanDefinition.getBeanClass().isAnnotationPresent(Controller.class)) {
+            final Class<?> controllerClass = beanDefinition.getBeanClass();
+            Arrays.stream(controllerClass.getDeclaredMethods())
+                    .filter(method -> method.isAnnotationPresent(RequestMapping.class))
+                    .forEach(method -> {
+                        final RequestMapping mapping = method.getAnnotation(RequestMapping.class);
+
+                        final RequestMappingInfo mappingInfo = new RequestMappingInfo(mapping.value(), new RequestMethodsRequestCondition(mapping.methods()));
+                        final HandlerMethod handlerMethod = new HandlerMethod(bean, method);
+
+                        handlerMapping.put(mappingInfo, handlerMethod);
+                    });
+        }
+    }
+
+    private void extractController(final BeanDefinition beanDefinition, final Object bean) {
+        if (Arrays.stream(beanDefinition.getBeanClass().getGenericInterfaces()).toList().contains(com.diy.framework.web.mvc.Controller.class)) {
+            final RequestMappingInfo mappingInfo = new RequestMappingInfo(beanDefinition.getBeanName(), new RequestMethodsRequestCondition());
+            handlerMapping.put(mappingInfo, bean);
         }
     }
 
