@@ -1,83 +1,109 @@
 package com.diy.framework.web.servlet;
 
+import com.diy.framework.beans.factory.BeanFactoryUtils;
 import com.diy.framework.context.ApplicationContext;
-import com.diy.framework.web.method.HandlerMethod;
-import com.diy.framework.web.method.RequestMappingInfo;
-import com.diy.framework.web.mvc.Controller;
-import com.diy.framework.web.mvc.anotation.RequestMethod;
-import com.diy.framework.web.mvc.view.JspViewResolver;
+import com.diy.framework.context.support.WebApplicationContextUtils;
+import com.diy.framework.core.Ordered;
 import com.diy.framework.web.mvc.view.ModelAndView;
-import com.diy.framework.web.mvc.view.UrlBasedViewResolver;
 import com.diy.framework.web.mvc.view.View;
 import com.diy.framework.web.mvc.view.ViewResolver;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.jetbrains.annotations.Nullable;
 
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
 public class DispatcherServlet extends HttpServlet {
 
-    private final List<ViewResolver> viewResolvers = new ArrayList<>();
+    private List<HandlerMapping> handlerMappings;
+    private List<HandlerAdapter> handlerAdapters;
+    private List<ViewResolver> viewResolvers;
 
-    public DispatcherServlet() {
-        this.viewResolvers.add(new UrlBasedViewResolver());
-        this.viewResolvers.add(new JspViewResolver());
+    @Override
+    public void init() throws ServletException {
+        initStrategies(initWebApplicationContext());
+        super.init();
+    }
+
+    private ApplicationContext initWebApplicationContext() {
+        return WebApplicationContextUtils.getWebApplicationContext(getServletContext(), ApplicationContext.APPLICATION_CONTEXT_ATTRIBUTE);
+    }
+
+    private void initStrategies(final ApplicationContext context) {
+        initHandlerMappings(context);
+        initHandlerAdapters(context);
+        initViewResolvers(context);
+    }
+
+    private void initHandlerMappings(final ApplicationContext context) {
+        final Map<String, HandlerMapping> matchingBeans =
+                BeanFactoryUtils.beansOfTypeIncludingAncestors(context, HandlerMapping.class);
+        this.handlerMappings = new ArrayList<>(matchingBeans.values());
+
+        this.handlerMappings.sort(Comparator.comparingInt(o -> ((Ordered) o).getOrder()));
+    }
+
+    private void initHandlerAdapters(final ApplicationContext context) {
+        final Map<String, HandlerAdapter> matchingBeans =
+                BeanFactoryUtils.beansOfTypeIncludingAncestors(context, HandlerAdapter.class);
+        this.handlerAdapters = new ArrayList<>(matchingBeans.values());
+    }
+
+    private void initViewResolvers(final ApplicationContext context) {
+        final Map<String, ViewResolver> matchingBeans =
+                BeanFactoryUtils.beansOfTypeIncludingAncestors(context, ViewResolver.class);
+        this.viewResolvers = new ArrayList<>(matchingBeans.values());
+
+        this.viewResolvers.sort(Comparator.comparingInt(o -> ((Ordered) o).getOrder()));
     }
 
     @Override
     protected void service(final HttpServletRequest req, final HttpServletResponse resp) throws ServletException, IOException {
-        final String uri = req.getRequestURI();
-        final String method = req.getMethod().toUpperCase();
+        doDispatch(req, resp);
+    }
 
-        final RequestMethod requestMethod = RequestMethod.valueOf(method);
-
-        final Object handler = getHandler(uri, requestMethod);
-
-        if (handler == null) {
-            return;
-        }
-
+    private void doDispatch(final HttpServletRequest req, final HttpServletResponse resp) {
         try {
-            if (handler instanceof HandlerMethod handlerMethod) {
-                final ModelAndView mav = handlerMethod.handle(req, resp);
-                render(mav, req, resp);
+            final Object handler = getHandler(req);
 
-                return;
-            }
+            final HandlerAdapter ha = getHandlerAdapter(handler);
 
-            if (handler instanceof Controller controller) {
-                final ModelAndView mav = controller.handleRequest(req, resp);
-                render(mav, req, resp);
+            final ModelAndView mv = ha.handle(req, resp, handler);
 
-                return;
-            }
-
-            throw new RuntimeException("not support request");
+            render(mv, req, resp);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
-    @Nullable
-    private Object getHandler(final String uri, final RequestMethod requestMethod) {
-        final Map<RequestMappingInfo, Object> handlerMapping = ApplicationContext.handlerMapping;
+    protected Object getHandler(final HttpServletRequest req) throws Exception {
+        if (this.handlerMappings != null) {
+            for (final HandlerMapping mapping : this.handlerMappings) {
+                final Object handler = mapping.getHandler(req);
+                if (handler != null) {
+                    return handler;
+                }
+            }
+        }
+        return null;
+    }
 
-        for (RequestMappingInfo mapping : handlerMapping.keySet()) {
-            if (mapping.isMatch(uri, requestMethod)) {
-                return handlerMapping.get(mapping);
+    protected HandlerAdapter getHandlerAdapter(final Object handler) throws ServletException {
+        if (this.handlerAdapters != null) {
+            for (final HandlerAdapter adapter : this.handlerAdapters) {
+                if (adapter.supports(handler)) {
+                    return adapter;
+                }
             }
         }
 
-        return null;
+        throw new ServletException("No adapter for handler [" + handler +
+                "]: The DispatcherServlet configuration needs to include a HandlerAdapter that supports this handler");
     }
 
     private void render(final ModelAndView mav, final HttpServletRequest req, final HttpServletResponse resp) throws Exception {
@@ -93,25 +119,15 @@ public class DispatcherServlet extends HttpServlet {
     }
 
     private View resolveViewName(final String viewName) {
-        for (final ViewResolver viewResolver : this.viewResolvers) {
-            final View view = viewResolver.resolveViewName(viewName);
-            if (view != null) {
-                return view;
+        if (this.viewResolvers != null) {
+            for (final ViewResolver viewResolver : this.viewResolvers) {
+                final View view = viewResolver.resolveViewName(viewName);
+                if (view != null) {
+                    return view;
+                }
             }
         }
 
         return null;
-    }
-
-    private Map<String, ?> parseParams(final HttpServletRequest req) throws IOException {
-        if ("application/json".equals(req.getHeader("Content-Type"))) {
-            final byte[] bodyBytes = req.getInputStream().readAllBytes();
-            final String body = new String(bodyBytes, StandardCharsets.UTF_8);
-
-            return new ObjectMapper().readValue(body, new TypeReference<Map<String, Object>>() {
-            });
-        } else {
-            return req.getParameterMap();
-        }
     }
 }
