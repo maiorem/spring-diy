@@ -75,6 +75,8 @@ public class DispatcherServlet extends HttpServlet {
 
             final ModelAndView mv = ha.handle(req, resp, handler);
 
+            if (mv == null) return;
+
             render(mv, req, resp);
         } catch (Exception e) {
             throw new RuntimeException(e);
